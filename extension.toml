@@ -11,6 +11,13 @@ capabilities = []
 repository = "https://github.com/moonbitlang/tree-sitter-moonbit"
 rev = "5435c307c6cf2ef0d508a99047b06f35a4308444"
 
+[language_servers.moonbit]
+name = "MoonBit native LSP"
+languages = ["MoonBit"]
+
+[language_servers.moonbit.language_ids]
+MoonBit = "moonbit"
+
 [lib]
 kind = "Rust"
 version = "0.7.0"
