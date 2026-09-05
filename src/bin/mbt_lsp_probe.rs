@@ -4,10 +4,11 @@
 mod lsp_probe;
 
 use std::env;
+use std::fs;
 use std::path::PathBuf;
 
 use lsp_probe::{
-    run_capabilities, run_freshness, run_project_roots, OutputFormat, ProbeOptions, Suite,
+    run_all, run_capabilities, run_freshness, run_project_roots, OutputFormat, ProbeOptions, Suite,
 };
 
 fn main() {
@@ -23,16 +24,19 @@ fn run() -> Result<(), String> {
         Suite::Capabilities => run_capabilities(&options)?,
         Suite::ProjectRoots => run_project_roots(&options)?,
         Suite::Freshness => run_freshness(&options)?,
-        Suite::All => return Err("all suite is incomplete until every scenario exists".to_string()),
+        Suite::All => run_all(&options)?,
     };
 
-    match options.format {
-        OutputFormat::Json => println!(
-            "{}",
-            serde_json::to_string_pretty(&evidence)
-                .map_err(|error| format!("serialize probe evidence: {error}"))?
-        ),
-        OutputFormat::Text => print_text(&evidence),
+    let rendered = match options.format {
+        OutputFormat::Json => serde_json::to_string_pretty(&evidence)
+            .map_err(|error| format!("serialize probe evidence: {error}"))?,
+        OutputFormat::Text => render_text(&evidence),
+    };
+    if let Some(output) = &options.output {
+        fs::write(output, format!("{rendered}\n"))
+            .map_err(|error| format!("write evidence {}: {error}", output.display()))?;
+    } else {
+        println!("{rendered}");
     }
     Ok(())
 }
@@ -41,6 +45,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<ProbeOptions, String
     let mut suite = None;
     let mut moon = None;
     let mut format = OutputFormat::Text;
+    let mut output = None;
     let mut args = args.peekable();
 
     while let Some(argument) = args.next() {
@@ -63,10 +68,17 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<ProbeOptions, String
                     .ok_or_else(|| "--format requires text or json".to_string())?;
                 format = OutputFormat::parse(&value)?;
             }
+            "--output" => {
+                output =
+                    Some(PathBuf::from(args.next().ok_or_else(|| {
+                        "--output requires a file path".to_string()
+                    })?));
+            }
             "-h" | "--help" => {
-                println!(
-                    "mbt_lsp_probe --suite capabilities|project-roots|freshness|all \\\n+  --moon <absolute-path> --format text|json"
-                );
+                println!(concat!(
+                    "mbt_lsp_probe --suite capabilities|project-roots|freshness|all ",
+                    "--moon <absolute-path> --format text|json [--output <path>]"
+                ));
                 std::process::exit(0);
             }
             _ => return Err(format!("unknown argument: {argument}")),
@@ -82,21 +94,27 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<ProbeOptions, String
         suite: suite.ok_or_else(|| "--suite is required".to_string())?,
         moon,
         format,
+        output,
     })
 }
 
-fn print_text(evidence: &serde_json::Value) {
-    println!("MoonBit LSP probe");
-    println!("suite: {}", evidence["suite"]);
-    println!("binary: {}", evidence["binary"]["path"]);
-    println!("version: {}", evidence["binary"]["version"]);
-    println!("cwd: {}", evidence["session"]["cwd"]);
-    println!("root URI: {}", evidence["session"]["root_uri"]);
-    println!(
-        "initialize capabilities: {}",
-        evidence["result"]["capabilities"]
-    );
-    println!("stderr: {}", evidence["session"]["stderr"]["text"]);
+fn render_text(evidence: &serde_json::Value) -> String {
+    let mut lines = vec![
+        "MoonBit LSP probe".to_string(),
+        format!("suite: {}", evidence["suite"]),
+        format!("binary: {}", evidence["binary"]["path"]),
+        format!("version: {}", evidence["binary"]["version"]),
+    ];
+    if evidence["suite"] == "all" {
+        lines.push(format!(
+            "completed suites: {}",
+            evidence["results"].as_array().map_or(0, Vec::len)
+        ));
+    } else {
+        lines.push(format!("root URI: {}", evidence["session"]["root_uri"]));
+        lines.push(format!("stderr: {}", evidence["session"]["stderr"]["text"]));
+    }
+    lines.join("\n")
 }
 
 #[cfg(test)]

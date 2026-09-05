@@ -54,6 +54,7 @@ pub struct ProbeOptions {
     pub suite: Suite,
     pub moon: PathBuf,
     pub format: OutputFormat,
+    pub output: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -809,6 +810,18 @@ pub fn run_freshness(options: &ProbeOptions) -> Result<Value, String> {
                 }
             ]
         }
+    }))
+}
+
+pub fn run_all(options: &ProbeOptions) -> Result<Value, String> {
+    let capabilities = run_capabilities(options)?;
+    let project_roots = run_project_roots(options)?;
+    let freshness = run_freshness(options)?;
+    Ok(json!({
+        "schema": "moonbit-lab/lsp-probe/v1",
+        "suite": "all",
+        "binary": capabilities["binary"],
+        "results": [capabilities, project_roots, freshness],
     }))
 }
 
