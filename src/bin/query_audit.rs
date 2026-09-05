@@ -7,12 +7,17 @@ use std::path::{Path, PathBuf};
 use tree_sitter::{Language, Parser, Query};
 
 const QUERY_DIR: &str = "languages/moonbit";
-const CASES: [&str; 2] = ["tests/cases/syntax.mbt", "tests/cases/interface.mbti"];
-const EXPECTED_QUERY_FILES: [&str; 4] = [
+const CASES: [&str; 3] = [
+    "tests/cases/syntax.mbt",
+    "tests/cases/interface.mbti",
+    "tests/cases/runnables.mbt",
+];
+const EXPECTED_QUERY_FILES: [&str; 5] = [
     "brackets.scm",
     "highlights.scm",
     "indents.scm",
     "outline.scm",
+    "runnables.scm",
 ];
 
 fn main() {
@@ -191,7 +196,7 @@ mod tests {
     #[test]
     fn pinned_grammar_parses_representative_sources() {
         let report = audit().expect("strict grammar audit");
-        assert_eq!(report.parsed_cases.len(), 2);
+        assert_eq!(report.parsed_cases.len(), 3);
     }
 
     #[test]
@@ -250,5 +255,50 @@ mod tests {
             .find(|task| task["label"] == "MoonBit: check formatting")
             .expect("format-check task");
         assert_eq!(format["args"], serde_json::json!(["fmt", "--check"]));
+    }
+
+    #[test]
+    fn runnables_are_top_level_main_and_tests_only() {
+        let language: Language = tree_sitter_moonbit::LANGUAGE.into();
+        let source = read(Path::new("tests/cases/runnables.mbt")).expect("runnable case");
+        let query_source =
+            read(Path::new("languages/moonbit/runnables.scm")).expect("runnable query");
+        let query = Query::new(&language, &query_source).expect("compiled runnables");
+        let mut parser = Parser::new();
+        parser.set_language(&language).expect("MoonBit grammar");
+        let tree = parser.parse(&source, None).expect("runnable syntax tree");
+        let run_index = query.capture_index_for_name("run").expect("run capture");
+        let mut cursor = QueryCursor::new();
+        let mut matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
+        let mut captures = Vec::new();
+        while let Some(query_match) = matches.next() {
+            let tag = query
+                .property_settings(query_match.pattern_index)
+                .iter()
+                .find(|property| property.key.as_ref() == "tag")
+                .and_then(|property| property.value.as_deref())
+                .expect("runnable tag");
+            for capture in query_match.captures {
+                if capture.index == run_index {
+                    captures.push((
+                        capture
+                            .node
+                            .utf8_text(source.as_bytes())
+                            .expect("UTF-8 runnable")
+                            .to_string(),
+                        capture.node.start_position().row,
+                        tag.to_string(),
+                    ));
+                }
+            }
+        }
+
+        assert_eq!(captures.len(), 2);
+        assert!(captures
+            .iter()
+            .any(|(text, row, tag)| text == "main" && *row == 14 && tag == "moon-run"));
+        assert!(captures
+            .iter()
+            .any(|(text, row, tag)| text == "test" && *row == 19 && tag == "moon-test"));
     }
 }
