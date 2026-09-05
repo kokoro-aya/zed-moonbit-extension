@@ -1,0 +1,6 @@
+import {
+  "pl-playground/geometry-library" @geometry,
+  "pl-playground/geometry-library/common",
+}
+
+pkgtype(kind: "executable")
