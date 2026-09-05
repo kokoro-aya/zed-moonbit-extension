@@ -6,7 +6,7 @@ mod lsp_probe;
 use std::env;
 use std::path::PathBuf;
 
-use lsp_probe::{run_capabilities, OutputFormat, ProbeOptions, Suite};
+use lsp_probe::{run_capabilities, run_project_roots, OutputFormat, ProbeOptions, Suite};
 
 fn main() {
     if let Err(error) = run() {
@@ -19,9 +19,7 @@ fn run() -> Result<(), String> {
     let options = parse_args(env::args().skip(1))?;
     let evidence = match options.suite {
         Suite::Capabilities => run_capabilities(&options)?,
-        Suite::ProjectRoots => {
-            return Err("project-roots suite has not been bound to scenarios yet".to_string())
-        }
+        Suite::ProjectRoots => run_project_roots(&options)?,
         Suite::Freshness => {
             return Err("freshness suite has not been bound to scenarios yet".to_string())
         }

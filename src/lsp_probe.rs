@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::fs;
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
@@ -284,6 +284,34 @@ impl LspSession {
         )
     }
 
+    pub fn drain_messages(&mut self, wait: Duration) -> Result<Vec<Value>, String> {
+        let mut messages: Vec<Value> = self.pending.drain(..).collect();
+        let deadline = Instant::now() + wait;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            match self.receiver.recv_timeout(remaining) {
+                Ok(ReaderEvent::Message(message)) => {
+                    self.timeline.push(message_summary("receive", &message));
+                    if !self.handle_server_request(&message)? {
+                        messages.push(message);
+                    }
+                }
+                Ok(ReaderEvent::Closed) => {
+                    return Err("MoonBit LSP stdout closed while draining messages".to_string())
+                }
+                Ok(ReaderEvent::Error(error)) => return Err(error),
+                Err(mpsc::RecvTimeoutError::Timeout) => break,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err("MoonBit LSP reader disconnected".to_string())
+                }
+            }
+        }
+        Ok(messages)
+    }
+
     pub fn finish(mut self) -> Result<Value, String> {
         let shutdown_result = self.request("shutdown", Value::Null, RESPONSE_TIMEOUT);
         let exit_result = self.notify("exit", Value::Null);
@@ -544,6 +572,309 @@ pub fn run_capabilities(options: &ProbeOptions) -> Result<Value, String> {
             }
         }
     }))
+}
+
+pub fn run_project_roots(options: &ProbeOptions) -> Result<Value, String> {
+    let projects = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/projects")
+        .canonicalize()
+        .map_err(|error| format!("resolve project fixtures: {error}"))?;
+    let library = projects.join("geometry-library");
+    let application = projects.join("geometry-application");
+
+    let direct_library = run_root_scenario(
+        options,
+        "direct-library",
+        &library,
+        &[ModuleCase::library(&library)],
+    )?;
+    let direct_application = run_root_scenario(
+        options,
+        "direct-application",
+        &application,
+        &[ModuleCase::application(&application)],
+    )?;
+    let parent = run_root_scenario(
+        options,
+        "parent-workspace",
+        &projects,
+        &[
+            ModuleCase::library(&library),
+            ModuleCase::application(&application),
+        ],
+    )?;
+
+    let comparisons = [
+        compare_module_navigation(&direct_library, &parent, "geometry-library")?,
+        compare_module_navigation(&direct_application, &parent, "geometry-application")?,
+    ];
+
+    Ok(json!({
+        "schema": "moonbit-lab/lsp-probe/v1",
+        "suite": "project-roots",
+        "binary": direct_library["binary"],
+        "scenarios": [direct_library, direct_application, parent],
+        "comparisons": comparisons,
+    }))
+}
+
+struct ModuleCase {
+    label: &'static str,
+    root: PathBuf,
+    main: PathBuf,
+    sources: Vec<PathBuf>,
+}
+
+impl ModuleCase {
+    fn library(root: &Path) -> Self {
+        Self {
+            label: "geometry-library",
+            root: root.to_path_buf(),
+            main: root.join("cmd/main/main.mbt"),
+            sources: vec![root.join("geometry.mbt"), root.join("common/origin.mbt")],
+        }
+    }
+
+    fn application(root: &Path) -> Self {
+        Self {
+            label: "geometry-application",
+            root: root.to_path_buf(),
+            main: root.join("cmd/main/main.mbt"),
+            sources: vec![root.join("report.mbt"), root.join("common/origin.mbt")],
+        }
+    }
+}
+
+fn run_root_scenario(
+    options: &ProbeOptions,
+    label: &str,
+    root: &Path,
+    modules: &[ModuleCase],
+) -> Result<Value, String> {
+    let mut session = LspSession::start(&options.moon, root)?;
+    let binary = session.binary_json();
+    let initialize = session.initialize()?;
+    let mut opened_uris = Vec::new();
+    let mut main_documents = Vec::new();
+
+    for module in modules {
+        let mut paths = module.sources.clone();
+        paths.push(module.main.clone());
+        for path in paths {
+            let text = read_source(&path)?;
+            let uri = session.open_document(&path, &text, 1)?;
+            if path == module.main {
+                main_documents.push((module, uri.clone(), text));
+            }
+            opened_uris.push(uri);
+        }
+    }
+
+    for (_, uri, _) in &main_documents {
+        session.request(
+            "textDocument/documentSymbol",
+            json!({ "textDocument": { "uri": uri } }),
+            RESPONSE_TIMEOUT,
+        )?;
+    }
+
+    let mut navigation = Vec::new();
+    for (module, uri, text) in &main_documents {
+        let position = position_of(text, "project_origin", 0)?;
+        let definition = session.request(
+            "textDocument/definition",
+            json!({
+                "textDocument": { "uri": uri },
+                "position": position,
+            }),
+            RESPONSE_TIMEOUT,
+        )?;
+        let references = session.request(
+            "textDocument/references",
+            json!({
+                "textDocument": { "uri": uri },
+                "position": position,
+                "context": { "includeDeclaration": true },
+            }),
+            RESPONSE_TIMEOUT,
+        )?;
+
+        let definition_uris = location_uris(&definition);
+        let reference_uris = location_uris(&references);
+        require_owned_locations(module, "definition", &definition_uris)?;
+        require_owned_locations(module, "references", &reference_uris)?;
+        if !definition_uris
+            .iter()
+            .any(|uri| uri.ends_with("/common/origin.mbt"))
+        {
+            return Err(format!(
+                "{} definition did not resolve to common/origin.mbt: {definition}",
+                module.label
+            ));
+        }
+
+        navigation.push(json!({
+            "module": module.label,
+            "source_uri": uri,
+            "position": position,
+            "definition": definition,
+            "definition_uris": definition_uris,
+            "references": references,
+            "reference_uris": reference_uris,
+        }));
+    }
+
+    let messages = session.drain_messages(Duration::from_secs(1))?;
+    let diagnostics = diagnostic_events(&messages);
+    let nonempty_diagnostics = diagnostics
+        .iter()
+        .filter(|event| {
+            event["diagnostics"]
+                .as_array()
+                .is_some_and(|items| !items.is_empty())
+        })
+        .count();
+    if nonempty_diagnostics != 0 {
+        return Err(format!(
+            "{label} published diagnostics for valid fixtures: {}",
+            Value::Array(diagnostics)
+        ));
+    }
+
+    for uri in opened_uris.iter().rev() {
+        session.close_document(uri)?;
+    }
+    let session_evidence = session.finish()?;
+
+    Ok(json!({
+        "label": label,
+        "binary": binary,
+        "initialize_capabilities": initialize.get("capabilities").cloned().unwrap_or(Value::Null),
+        "session": session_evidence,
+        "opened_uris": opened_uris,
+        "diagnostics": diagnostics,
+        "nonempty_diagnostic_events": nonempty_diagnostics,
+        "navigation": navigation,
+    }))
+}
+
+fn require_owned_locations(
+    module: &ModuleCase,
+    request: &str,
+    uris: &BTreeSet<String>,
+) -> Result<(), String> {
+    if uris.is_empty() {
+        return Err(format!(
+            "{} {request} returned no location URIs",
+            module.label
+        ));
+    }
+    let owner_prefix = url::Url::from_directory_path(
+        module
+            .root
+            .canonicalize()
+            .map_err(|error| format!("resolve {} root: {error}", module.label))?,
+    )
+    .map_err(|_| format!("convert {} root to URI", module.label))?
+    .to_string();
+    if let Some(uri) = uris.iter().find(|uri| !uri.starts_with(&owner_prefix)) {
+        return Err(format!(
+            "{} {request} crossed its module boundary: {uri}",
+            module.label
+        ));
+    }
+    Ok(())
+}
+
+fn compare_module_navigation(
+    direct: &Value,
+    parent: &Value,
+    module: &str,
+) -> Result<Value, String> {
+    let direct_navigation = find_navigation(direct, module)?;
+    let parent_navigation = find_navigation(parent, module)?;
+    for key in ["definition_uris", "reference_uris"] {
+        if direct_navigation[key] != parent_navigation[key] {
+            return Err(format!(
+                "{module} {key} differs between direct and parent roots: direct={}, parent={}",
+                direct_navigation[key], parent_navigation[key]
+            ));
+        }
+    }
+    Ok(json!({
+        "module": module,
+        "diagnostics_equivalent": direct["nonempty_diagnostic_events"] == parent["nonempty_diagnostic_events"],
+        "definition_uris_equivalent": true,
+        "reference_uris_equivalent": true,
+        "owned_boundary_preserved": true,
+    }))
+}
+
+fn find_navigation<'a>(scenario: &'a Value, module: &str) -> Result<&'a Value, String> {
+    scenario["navigation"]
+        .as_array()
+        .and_then(|items| items.iter().find(|item| item["module"] == module))
+        .ok_or_else(|| format!("scenario lacks navigation evidence for {module}"))
+}
+
+fn location_uris(value: &Value) -> BTreeSet<String> {
+    let mut uris = BTreeSet::new();
+    collect_location_uris(value, &mut uris);
+    uris
+}
+
+fn collect_location_uris(value: &Value, uris: &mut BTreeSet<String>) {
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                collect_location_uris(item, uris);
+            }
+        }
+        Value::Object(fields) => {
+            for key in ["uri", "targetUri"] {
+                if let Some(uri) = fields.get(key).and_then(Value::as_str) {
+                    uris.insert(uri.to_string());
+                }
+            }
+            for value in fields.values() {
+                collect_location_uris(value, uris);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn diagnostic_events(messages: &[Value]) -> Vec<Value> {
+    messages
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| message["method"] == "textDocument/publishDiagnostics")
+        .map(|(sequence, message)| {
+            let diagnostics = message
+                .pointer("/params/diagnostics")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .map(|diagnostic| {
+                            json!({
+                                "range": diagnostic.get("range").cloned().unwrap_or(Value::Null),
+                                "severity": diagnostic.get("severity").cloned().unwrap_or(Value::Null),
+                                "code": diagnostic.get("code").cloned().unwrap_or(Value::Null),
+                                "message": diagnostic.get("message").cloned().unwrap_or(Value::Null),
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            json!({
+                "sequence": sequence,
+                "uri": message.pointer("/params/uri").cloned().unwrap_or(Value::Null),
+                "version": message.pointer("/params/version").cloned().unwrap_or(Value::Null),
+                "diagnostics": diagnostics,
+            })
+        })
+        .collect()
 }
 
 fn require_capability(capabilities: &Value, name: &str) -> Result<(), String> {
