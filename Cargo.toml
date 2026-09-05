@@ -6,11 +6,18 @@ publish = false
 
 [features]
 default = []
-dev-tools = []
+dev-tools = ["dep:tree-sitter", "dep:tree-sitter-moonbit"]
 
 [lib]
 path = "src/lib.rs"
 crate-type = ["cdylib"]
 
+[[bin]]
+name = "query_audit"
+path = "src/bin/query_audit.rs"
+required-features = ["dev-tools"]
+
 [dependencies]
+tree-sitter = { version = "0.26.8", optional = true }
+tree-sitter-moonbit = { git = "https://github.com/moonbitlang/tree-sitter-moonbit", rev = "5435c307c6cf2ef0d508a99047b06f35a4308444", optional = true }
 zed_extension_api = "0.7.0"

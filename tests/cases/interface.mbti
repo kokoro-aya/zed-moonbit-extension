@@ -1,0 +1,16 @@
+// Representative output shape from `moon info`.
+package "pl-playground/query-case"
+
+// Values
+pub fn measure(Shape) -> Int
+
+// Types and methods
+pub struct Point {
+  x : Int
+  y : Int
+}
+
+pub enum Shape {
+  Dot(Point)
+  Segment(Point, Point)
+}
