@@ -185,6 +185,7 @@ fn read(path: &Path) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
     use tree_sitter::{QueryCursor, StreamingIterator};
 
     #[test]
@@ -232,5 +233,22 @@ mod tests {
         assert!(names.contains("Shape"));
         assert!(names.contains("measure"));
         assert!(names.contains("\"measure a point\""));
+    }
+
+    #[test]
+    fn tasks_use_structured_non_mutating_commands() {
+        let tasks: Value = serde_json::from_str(include_str!("../../languages/moonbit/tasks.json"))
+            .expect("tasks JSON");
+        let tasks = tasks.as_array().expect("task inventory");
+
+        assert_eq!(tasks.len(), 5);
+        assert!(tasks.iter().all(|task| task["command"] == "moon"));
+        assert!(tasks.iter().all(|task| task["args"].is_array()));
+        assert!(tasks.iter().all(|task| task.get("cwd").is_none()));
+        let format = tasks
+            .iter()
+            .find(|task| task["label"] == "MoonBit: check formatting")
+            .expect("format-check task");
+        assert_eq!(format["args"], serde_json::json!(["fmt", "--check"]));
     }
 }

@@ -1,0 +1,29 @@
+[
+  {
+    "label": "MoonBit: check workspace",
+    "command": "moon",
+    "args": ["check"]
+  },
+  {
+    "label": "MoonBit: test workspace",
+    "command": "moon",
+    "args": ["test"]
+  },
+  {
+    "label": "MoonBit: run current file",
+    "command": "moon",
+    "args": ["run", "$ZED_RELATIVE_FILE"],
+    "tags": ["moon-run"]
+  },
+  {
+    "label": "MoonBit: test current file",
+    "command": "moon",
+    "args": ["test", "$ZED_RELATIVE_FILE"],
+    "tags": ["moon-test"]
+  },
+  {
+    "label": "MoonBit: check formatting",
+    "command": "moon",
+    "args": ["fmt", "--check"]
+  }
+]
