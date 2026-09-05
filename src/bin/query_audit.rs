@@ -8,7 +8,7 @@ use tree_sitter::{Language, Parser, Query};
 
 const QUERY_DIR: &str = "languages/moonbit";
 const CASES: [&str; 2] = ["tests/cases/syntax.mbt", "tests/cases/interface.mbti"];
-const EXPECTED_QUERY_FILES: [&str; 1] = ["highlights.scm"];
+const EXPECTED_QUERY_FILES: [&str; 3] = ["brackets.scm", "highlights.scm", "indents.scm"];
 
 fn main() {
     let strict = std::env::args()
