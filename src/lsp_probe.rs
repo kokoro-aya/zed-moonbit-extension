@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::fs;
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -211,7 +212,7 @@ impl LspSession {
         if let Some(position) = self
             .pending
             .iter()
-            .position(|message| message.get("id").and_then(Value::as_u64) == Some(id))
+            .position(|message| is_response_for(message, id))
         {
             return response_result(
                 method,
@@ -230,8 +231,11 @@ impl LspSession {
             let message = self
                 .receive_from_channel(remaining)
                 .map_err(|error| format!("{error}; outbound {method} request was {request}"))?;
-            if message.get("id").and_then(Value::as_u64) == Some(id) {
+            if is_response_for(&message, id) {
                 return response_result(method, message);
+            }
+            if self.handle_server_request(&message)? {
+                continue;
             }
             self.pending.push_back(message);
         }
@@ -239,6 +243,45 @@ impl LspSession {
 
     pub fn notify(&mut self, method: &str, params: Value) -> Result<(), String> {
         self.send(call_message(None, method, params))
+    }
+
+    pub fn open_document(
+        &mut self,
+        path: &Path,
+        text: &str,
+        version: i64,
+    ) -> Result<String, String> {
+        let uri = file_uri(path)?;
+        self.timeline.push(json!({
+            "event": "document",
+            "method": "textDocument/didOpen",
+            "uri": uri,
+            "version": version,
+        }));
+        self.notify(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "moonbit",
+                    "version": version,
+                    "text": text,
+                }
+            }),
+        )?;
+        Ok(uri)
+    }
+
+    pub fn close_document(&mut self, uri: &str) -> Result<(), String> {
+        self.timeline.push(json!({
+            "event": "document",
+            "method": "textDocument/didClose",
+            "uri": uri,
+        }));
+        self.notify(
+            "textDocument/didClose",
+            json!({ "textDocument": { "uri": uri } }),
+        )
     }
 
     pub fn finish(mut self) -> Result<Value, String> {
@@ -329,6 +372,38 @@ impl LspSession {
         }
     }
 
+    fn handle_server_request(&mut self, message: &Value) -> Result<bool, String> {
+        let Some(method) = message.get("method").and_then(Value::as_str) else {
+            return Ok(false);
+        };
+        let Some(id) = message.get("id").cloned() else {
+            return Ok(false);
+        };
+
+        let result = match method {
+            "workspace/configuration" => {
+                let count = message
+                    .pointer("/params/items")
+                    .and_then(Value::as_array)
+                    .map_or(0, Vec::len);
+                Value::Array(vec![Value::Null; count])
+            }
+            "client/registerCapability" | "window/workDoneProgress/create" => Value::Null,
+            _ => Value::Null,
+        };
+        self.timeline.push(json!({
+            "event": "server_request",
+            "method": method,
+            "handling": if matches!(method, "workspace/configuration" | "client/registerCapability" | "window/workDoneProgress/create") {
+                "modeled"
+            } else {
+                "null-fallback"
+            },
+        }));
+        self.send(response_message(id, result))?;
+        Ok(true)
+    }
+
     fn stderr_json(&self) -> Value {
         let state = self.stderr.lock().expect("stderr capture poisoned");
         json!({
@@ -345,6 +420,18 @@ fn response_result(method: &str, message: Value) -> Result<Value, String> {
         return Err(format!("{method} returned JSON-RPC error: {error}"));
     }
     Ok(message.get("result").cloned().unwrap_or(Value::Null))
+}
+
+fn is_response_for(message: &Value, id: u64) -> bool {
+    message.get("method").is_none() && message.get("id").and_then(Value::as_u64) == Some(id)
+}
+
+fn response_message(id: Value, result: Value) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": result,
+    })
 }
 
 fn call_message(id: Option<u64>, method: &str, params: Value) -> Value {
@@ -381,6 +468,65 @@ pub fn run_capabilities(options: &ProbeOptions) -> Result<Value, String> {
     let mut session = LspSession::start(&options.moon, &fixture)?;
     let binary = session.binary_json();
     let initialize = session.initialize()?;
+    let capabilities = initialize
+        .get("capabilities")
+        .cloned()
+        .unwrap_or(Value::Null);
+    require_capability(&capabilities, "hoverProvider")?;
+    require_capability(&capabilities, "completionProvider")?;
+    require_capability(&capabilities, "documentFormattingProvider")?;
+
+    let geometry_path = fixture.join("geometry.mbt");
+    let main_path = fixture.join("cmd/main/main.mbt");
+    let geometry_text = read_source(&geometry_path)?;
+    let main_text = read_source(&main_path)?;
+    let geometry_uri = session.open_document(&geometry_path, &geometry_text, 1)?;
+    let main_uri = session.open_document(&main_path, &main_text, 1)?;
+
+    let hover_position = position_of(&main_text, "scale", 0)?;
+    let hover = session.request(
+        "textDocument/hover",
+        json!({
+            "textDocument": { "uri": main_uri },
+            "position": hover_position,
+        }),
+        RESPONSE_TIMEOUT,
+    )?;
+    if hover.is_null() {
+        return Err("advertised hoverProvider returned null for the scale call".to_string());
+    }
+
+    let completion_position = position_of(&main_text, "@geometry.scale", "@geometry.".len())?;
+    let completion = session.request(
+        "textDocument/completion",
+        json!({
+            "textDocument": { "uri": main_uri },
+            "position": completion_position,
+        }),
+        RESPONSE_TIMEOUT,
+    )?;
+    if !completion.is_array() && !completion.is_object() {
+        return Err(format!(
+            "advertised completionProvider returned an unexpected result: {completion}"
+        ));
+    }
+
+    let formatting = session.request(
+        "textDocument/formatting",
+        json!({
+            "textDocument": { "uri": geometry_uri },
+            "options": { "tabSize": 2, "insertSpaces": true }
+        }),
+        RESPONSE_TIMEOUT,
+    )?;
+    if !formatting.is_array() {
+        return Err(format!(
+            "advertised documentFormattingProvider returned an unexpected result: {formatting}"
+        ));
+    }
+
+    session.close_document(&main_uri)?;
+    session.close_document(&geometry_uri)?;
     let session_evidence = session.finish()?;
 
     Ok(json!({
@@ -389,10 +535,55 @@ pub fn run_capabilities(options: &ProbeOptions) -> Result<Value, String> {
         "binary": binary,
         "session": session_evidence,
         "result": {
-            "capabilities": initialize.get("capabilities").cloned().unwrap_or(Value::Null),
+            "capabilities": capabilities,
             "server_info": initialize.get("serverInfo").cloned().unwrap_or(Value::Null),
+            "requests": {
+                "hover": hover,
+                "completion": completion,
+                "formatting": formatting,
+            }
         }
     }))
+}
+
+fn require_capability(capabilities: &Value, name: &str) -> Result<(), String> {
+    match capabilities.get(name) {
+        Some(Value::Bool(true)) | Some(Value::Object(_)) => Ok(()),
+        actual => Err(format!(
+            "MoonBit LSP did not advertise {name}: {}",
+            actual.unwrap_or(&Value::Null)
+        )),
+    }
+}
+
+fn read_source(path: &Path) -> Result<String, String> {
+    fs::read_to_string(path).map_err(|error| format!("read source {}: {error}", path.display()))
+}
+
+fn file_uri(path: &Path) -> Result<String, String> {
+    let path = path
+        .canonicalize()
+        .map_err(|error| format!("resolve source {}: {error}", path.display()))?;
+    url::Url::from_file_path(&path)
+        .map(String::from)
+        .map_err(|_| format!("convert source path to URI: {}", path.display()))
+}
+
+fn position_of(text: &str, needle: &str, offset_in_needle: usize) -> Result<Value, String> {
+    if offset_in_needle > needle.len() || !needle.is_char_boundary(offset_in_needle) {
+        return Err(format!(
+            "invalid byte offset {offset_in_needle} in {needle:?}"
+        ));
+    }
+    let start = text
+        .find(needle)
+        .ok_or_else(|| format!("source does not contain {needle:?}"))?;
+    let offset = start + offset_in_needle;
+    let prefix = &text[..offset];
+    let line = prefix.bytes().filter(|byte| *byte == b'\n').count();
+    let line_start = prefix.rfind('\n').map_or(0, |index| index + 1);
+    let character = text[line_start..offset].encode_utf16().count();
+    Ok(json!({ "line": line, "character": character }))
 }
 
 fn moon_version(moon: &Path) -> Result<String, String> {
@@ -511,5 +702,13 @@ mod tests {
             .as_object()
             .expect("notification")
             .contains_key("params"));
+    }
+
+    #[test]
+    fn positions_use_utf16_code_units() {
+        let position = position_of("fn main {\n  let x = \"🌙\"\n}\n", "\"🌙\"", 5)
+            .expect("position after moon emoji");
+
+        assert_eq!(position, json!({ "line": 1, "character": 13 }));
     }
 }
