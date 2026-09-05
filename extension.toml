@@ -1,0 +1,12 @@
+id = "moonbit-lab"
+name = "MoonBit Lab"
+description = "Native MoonBit language support for Zed, developed as a provenance-aware thin client."
+version = "0.2.9"
+schema_version = 1
+authors = ["PL Playground"]
+repository = "https://github.com/kokoro-aya/playgrounds"
+capabilities = []
+
+[lib]
+kind = "Rust"
+version = "0.7.0"
