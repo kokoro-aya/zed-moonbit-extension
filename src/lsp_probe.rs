@@ -284,6 +284,83 @@ impl LspSession {
         )
     }
 
+    pub fn change_document(
+        &mut self,
+        uri: &str,
+        version: i64,
+        content_changes: Value,
+    ) -> Result<(), String> {
+        self.timeline.push(json!({
+            "event": "document",
+            "method": "textDocument/didChange",
+            "uri": uri,
+            "version": version,
+        }));
+        self.notify(
+            "textDocument/didChange",
+            json!({
+                "textDocument": { "uri": uri, "version": version },
+                "contentChanges": content_changes,
+            }),
+        )
+    }
+
+    pub fn save_document(&mut self, uri: &str, text: &str) -> Result<(), String> {
+        self.timeline.push(json!({
+            "event": "document",
+            "method": "textDocument/didSave",
+            "uri": uri,
+        }));
+        self.notify(
+            "textDocument/didSave",
+            json!({
+                "textDocument": { "uri": uri },
+                "text": text,
+            }),
+        )
+    }
+
+    pub fn wait_for_diagnostic_state(
+        &mut self,
+        uri: &str,
+        want_nonempty: bool,
+        timeout: Duration,
+    ) -> Result<Vec<Value>, String> {
+        let deadline = Instant::now() + timeout;
+        let mut observed = Vec::new();
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(format!(
+                    "timeout waiting for {} diagnostics on {uri}; observed {}",
+                    if want_nonempty { "nonempty" } else { "empty" },
+                    Value::Array(observed)
+                ));
+            }
+            let message = if let Some(message) = self.pending.pop_front() {
+                message
+            } else {
+                self.receive_from_channel(remaining)?
+            };
+            if self.handle_server_request(&message)? {
+                continue;
+            }
+            if message["method"] != "textDocument/publishDiagnostics"
+                || message.pointer("/params/uri").and_then(Value::as_str) != Some(uri)
+            {
+                continue;
+            }
+            let event = normalized_diagnostic_event(&message, observed.len());
+            let is_nonempty = event["diagnostics"]
+                .as_array()
+                .is_some_and(|items| !items.is_empty());
+            observed.push(event);
+            if is_nonempty == want_nonempty {
+                return Ok(observed);
+            }
+        }
+    }
+
     pub fn drain_messages(&mut self, wait: Duration) -> Result<Vec<Value>, String> {
         let mut messages: Vec<Value> = self.pending.drain(..).collect();
         let deadline = Instant::now() + wait;
@@ -618,6 +695,123 @@ pub fn run_project_roots(options: &ProbeOptions) -> Result<Value, String> {
     }))
 }
 
+pub fn run_freshness(options: &ProbeOptions) -> Result<Value, String> {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/projects/geometry-library")
+        .canonicalize()
+        .map_err(|error| format!("resolve freshness fixture: {error}"))?;
+    let path = fixture.join("geometry.mbt");
+    let valid_text = read_source(&path)?;
+    let mut session = LspSession::start(&options.moon, &fixture)?;
+    let binary = session.binary_json();
+    let initialize = session.initialize()?;
+    if initialize.pointer("/capabilities/textDocumentSync") != Some(&json!(2)) {
+        return Err(format!(
+            "freshness suite requires incremental text sync, got {}",
+            initialize
+                .pointer("/capabilities/textDocumentSync")
+                .unwrap_or(&Value::Null)
+        ));
+    }
+
+    let uri = session.open_document(&path, &valid_text, 1)?;
+    session.request(
+        "textDocument/documentSymbol",
+        json!({ "textDocument": { "uri": uri } }),
+        RESPONSE_TIMEOUT,
+    )?;
+    let baseline_messages = session.drain_messages(Duration::from_millis(500))?;
+    let baseline_diagnostics = diagnostic_events(&baseline_messages);
+    if baseline_diagnostics.iter().any(|event| {
+        event["uri"] == uri
+            && event["diagnostics"]
+                .as_array()
+                .is_some_and(|items| !items.is_empty())
+    }) {
+        return Err(format!(
+            "valid baseline unexpectedly published diagnostics: {}",
+            Value::Array(baseline_diagnostics)
+        ));
+    }
+
+    let invalid_range = range_of(&valid_text, "2")?;
+    session.change_document(
+        &uri,
+        2,
+        json!([{ "range": invalid_range, "rangeLength": 1, "text": "\"broken\"" }]),
+    )?;
+    let invalid_diagnostics = session.wait_for_diagnostic_state(&uri, true, RESPONSE_TIMEOUT)?;
+
+    let invalid_text = valid_text.replacen('2', "\"broken\"", 1);
+    let repair_range = range_of(&invalid_text, "\"broken\"")?;
+    session.change_document(
+        &uri,
+        3,
+        json!([{ "range": repair_range, "rangeLength": 8, "text": "2" }]),
+    )?;
+    let repair_diagnostics = session.wait_for_diagnostic_state(&uri, false, RESPONSE_TIMEOUT)?;
+
+    session.save_document(&uri, &valid_text)?;
+    session.request(
+        "textDocument/documentSymbol",
+        json!({ "textDocument": { "uri": uri } }),
+        RESPONSE_TIMEOUT,
+    )?;
+    let after_save_messages = session.drain_messages(Duration::from_millis(750))?;
+    let after_save_diagnostics = diagnostic_events(&after_save_messages);
+    if after_save_diagnostics.iter().any(|event| {
+        event["uri"] == uri
+            && event["diagnostics"]
+                .as_array()
+                .is_some_and(|items| !items.is_empty())
+    }) {
+        return Err(format!(
+            "didSave regressed repaired diagnostics: {}",
+            Value::Array(after_save_diagnostics)
+        ));
+    }
+
+    session.close_document(&uri)?;
+    let session_evidence = session.finish()?;
+
+    Ok(json!({
+        "schema": "moonbit-lab/lsp-probe/v1",
+        "suite": "freshness",
+        "binary": binary,
+        "session": session_evidence,
+        "result": {
+            "document_uri": uri,
+            "sync_kind": 2,
+            "stages": [
+                {
+                    "label": "valid-open",
+                    "version": 1,
+                    "diagnostics": baseline_diagnostics,
+                    "nonempty": false,
+                },
+                {
+                    "label": "unsaved-invalid",
+                    "version": 2,
+                    "diagnostics": invalid_diagnostics,
+                    "nonempty": true,
+                },
+                {
+                    "label": "unsaved-repair",
+                    "version": 3,
+                    "diagnostics": repair_diagnostics,
+                    "nonempty": false,
+                },
+                {
+                    "label": "saved-repair",
+                    "version": 3,
+                    "diagnostics": after_save_diagnostics,
+                    "nonempty": false,
+                }
+            ]
+        }
+    }))
+}
+
 struct ModuleCase {
     label: &'static str,
     root: PathBuf,
@@ -849,32 +1043,40 @@ fn diagnostic_events(messages: &[Value]) -> Vec<Value> {
         .iter()
         .enumerate()
         .filter(|(_, message)| message["method"] == "textDocument/publishDiagnostics")
-        .map(|(sequence, message)| {
-            let diagnostics = message
-                .pointer("/params/diagnostics")
-                .and_then(Value::as_array)
-                .map(|items| {
-                    items
-                        .iter()
-                        .map(|diagnostic| {
-                            json!({
-                                "range": diagnostic.get("range").cloned().unwrap_or(Value::Null),
-                                "severity": diagnostic.get("severity").cloned().unwrap_or(Value::Null),
-                                "code": diagnostic.get("code").cloned().unwrap_or(Value::Null),
-                                "message": diagnostic.get("message").cloned().unwrap_or(Value::Null),
-                            })
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            json!({
-                "sequence": sequence,
-                "uri": message.pointer("/params/uri").cloned().unwrap_or(Value::Null),
-                "version": message.pointer("/params/version").cloned().unwrap_or(Value::Null),
-                "diagnostics": diagnostics,
-            })
-        })
+        .map(|(sequence, message)| normalized_diagnostic_event(message, sequence))
         .collect()
+}
+
+fn normalized_diagnostic_event(message: &Value, sequence: usize) -> Value {
+    let diagnostics = message
+        .pointer("/params/diagnostics")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .map(|diagnostic| {
+                    json!({
+                        "range": diagnostic.get("range").cloned().unwrap_or(Value::Null),
+                        "severity": diagnostic.get("severity").cloned().unwrap_or(Value::Null),
+                        "code": diagnostic.get("code").cloned().unwrap_or(Value::Null),
+                        "message": diagnostic.get("message").cloned().unwrap_or(Value::Null),
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    json!({
+        "sequence": sequence,
+        "uri": message.pointer("/params/uri").cloned().unwrap_or(Value::Null),
+        "version": message.pointer("/params/version").cloned().unwrap_or(Value::Null),
+        "diagnostics": diagnostics,
+    })
+}
+
+fn range_of(text: &str, needle: &str) -> Result<Value, String> {
+    let start = position_of(text, needle, 0)?;
+    let end = position_of(text, needle, needle.len())?;
+    Ok(json!({ "start": start, "end": end }))
 }
 
 fn require_capability(capabilities: &Value, name: &str) -> Result<(), String> {
