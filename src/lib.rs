@@ -1,6 +1,10 @@
 #![forbid(unsafe_code)]
 
-use zed_extension_api as zed;
+mod launch;
+
+use zed_extension_api::{self as zed, settings::LspSettings};
+
+use launch::build_launch_plan;
 
 struct MoonBitLabExtension;
 
@@ -14,16 +18,23 @@ impl zed::Extension for MoonBitLabExtension {
         _language_server_id: &zed::LanguageServerId,
         worktree: &zed::Worktree,
     ) -> zed::Result<zed::Command> {
-        let moon = worktree.which("moon").ok_or_else(|| {
-            "MoonBit toolchain not found: `moon` is not available in this worktree's PATH."
-                .to_string()
-        })?;
+        let settings = LspSettings::for_worktree("moonbit", worktree)
+            .map_err(|error| format!("Invalid MoonBit LSP settings: {error}"))?;
+        let binary = settings.binary.as_ref();
+        let (platform, _) = zed::current_platform();
+        let shell_env = match platform {
+            zed::Os::Mac | zed::Os::Linux => worktree.shell_env(),
+            zed::Os::Windows => Vec::new(),
+        };
 
-        Ok(zed::Command {
-            command: moon,
-            args: vec!["lsp".to_string()],
-            env: worktree.shell_env(),
-        })
+        build_launch_plan(
+            binary.and_then(|value| value.path.clone()),
+            worktree.which("moon"),
+            binary.and_then(|value| value.arguments.clone()),
+            shell_env,
+            binary.and_then(|value| value.env.clone()),
+        )
+        .map(launch::LaunchPlan::into_command)
     }
 }
 
