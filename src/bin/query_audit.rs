@@ -8,7 +8,12 @@ use tree_sitter::{Language, Parser, Query};
 
 const QUERY_DIR: &str = "languages/moonbit";
 const CASES: [&str; 2] = ["tests/cases/syntax.mbt", "tests/cases/interface.mbti"];
-const EXPECTED_QUERY_FILES: [&str; 3] = ["brackets.scm", "highlights.scm", "indents.scm"];
+const EXPECTED_QUERY_FILES: [&str; 4] = [
+    "brackets.scm",
+    "highlights.scm",
+    "indents.scm",
+    "outline.scm",
+];
 
 fn main() {
     let strict = std::env::args()
@@ -180,6 +185,7 @@ fn read(path: &Path) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tree_sitter::{QueryCursor, StreamingIterator};
 
     #[test]
     fn pinned_grammar_parses_representative_sources() {
@@ -191,5 +197,40 @@ mod tests {
     fn unknown_highlight_capture_is_rejected() {
         assert!(!capture_allowed("highlights", "module"));
         assert!(capture_allowed("highlights", "type.builtin"));
+    }
+
+    #[test]
+    fn outline_exposes_top_level_declarations() {
+        let language: Language = tree_sitter_moonbit::LANGUAGE.into();
+        let source = read(Path::new("tests/cases/syntax.mbt")).expect("syntax case");
+        let query_source = read(Path::new("languages/moonbit/outline.scm")).expect("outline query");
+        let query = Query::new(&language, &query_source).expect("compiled outline");
+        let mut parser = Parser::new();
+        parser.set_language(&language).expect("MoonBit grammar");
+        let tree = parser.parse(&source, None).expect("syntax tree");
+        let name_index = query
+            .capture_index_for_name("name")
+            .expect("outline name capture");
+        let mut cursor = QueryCursor::new();
+        let mut matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
+        let mut names = BTreeSet::new();
+        while let Some(query_match) = matches.next() {
+            for capture in query_match.captures {
+                if capture.index == name_index {
+                    names.insert(
+                        capture
+                            .node
+                            .utf8_text(source.as_bytes())
+                            .expect("UTF-8 capture")
+                            .to_string(),
+                    );
+                }
+            }
+        }
+
+        assert!(names.contains("Point"));
+        assert!(names.contains("Shape"));
+        assert!(names.contains("measure"));
+        assert!(names.contains("\"measure a point\""));
     }
 }
