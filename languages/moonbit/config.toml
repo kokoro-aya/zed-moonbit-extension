@@ -1,0 +1,9 @@
+name = "MoonBit"
+grammar = "moonbit"
+path_suffixes = ["mbt", "mbti"]
+
+line_comments = ["// "]
+block_comment = ["/* ", " */"]
+
+tab_size = 2
+hard_tabs = false
