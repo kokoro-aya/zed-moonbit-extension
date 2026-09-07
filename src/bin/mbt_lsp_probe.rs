@@ -8,7 +8,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use lsp_probe::{
-    run_all, run_capabilities, run_freshness, run_project_roots, OutputFormat, ProbeOptions, Suite,
+    run_all, run_capabilities, run_freshness, run_project_roots, OutputFormat, ProbeOptions,
+    ServerRequestPolicy, Suite,
 };
 
 fn main() {
@@ -46,6 +47,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<ProbeOptions, String
     let mut moon = None;
     let mut format = OutputFormat::Text;
     let mut output = None;
+    let mut server_request_policy = ServerRequestPolicy::Strict;
     let mut args = args.peekable();
 
     while let Some(argument) = args.next() {
@@ -74,10 +76,17 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<ProbeOptions, String
                         "--output requires a file path".to_string()
                     })?));
             }
+            "--server-requests" => {
+                let value = args.next().ok_or_else(|| {
+                    "--server-requests requires strict or exploratory".to_string()
+                })?;
+                server_request_policy = ServerRequestPolicy::parse(&value)?;
+            }
             "-h" | "--help" => {
                 println!(concat!(
                     "mbt_lsp_probe --suite capabilities|project-roots|freshness|all ",
-                    "--moon <absolute-path> --format text|json [--output <path>]"
+                    "--moon <absolute-path> --format text|json [--output <path>] ",
+                    "[--server-requests strict|exploratory]"
                 ));
                 std::process::exit(0);
             }
@@ -95,6 +104,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<ProbeOptions, String
         moon,
         format,
         output,
+        server_request_policy,
     })
 }
 
@@ -131,5 +141,39 @@ mod tests {
         .expect_err("relative moon path");
 
         assert!(error.contains("absolute"));
+    }
+
+    #[test]
+    fn cli_defaults_to_strict_server_requests() {
+        let options = parse_args(
+            ["--suite", "capabilities", "--moon", "/toolchains/moon"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .expect("strict defaults");
+
+        assert_eq!(options.server_request_policy, ServerRequestPolicy::Strict);
+    }
+
+    #[test]
+    fn cli_can_select_exploratory_server_requests() {
+        let options = parse_args(
+            [
+                "--suite",
+                "capabilities",
+                "--moon",
+                "/toolchains/moon",
+                "--server-requests",
+                "exploratory",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .expect("exploratory policy");
+
+        assert_eq!(
+            options.server_request_policy,
+            ServerRequestPolicy::Exploratory
+        );
     }
 }

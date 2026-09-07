@@ -39,6 +39,29 @@ pub enum OutputFormat {
     Json,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerRequestPolicy {
+    Strict,
+    Exploratory,
+}
+
+impl ServerRequestPolicy {
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "strict" => Ok(Self::Strict),
+            "exploratory" => Ok(Self::Exploratory),
+            _ => Err(format!("unknown server-request policy: {value}")),
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Strict => "strict",
+            Self::Exploratory => "exploratory",
+        }
+    }
+}
+
 impl OutputFormat {
     pub fn parse(value: &str) -> Result<Self, String> {
         match value {
@@ -55,6 +78,7 @@ pub struct ProbeOptions {
     pub moon: PathBuf,
     pub format: OutputFormat,
     pub output: Option<PathBuf>,
+    pub server_request_policy: ServerRequestPolicy,
 }
 
 #[derive(Debug)]
@@ -84,10 +108,15 @@ pub struct LspSession {
     version: String,
     cwd: PathBuf,
     root_uri: String,
+    server_request_policy: ServerRequestPolicy,
 }
 
 impl LspSession {
-    pub fn start(moon: &Path, cwd: &Path) -> Result<Self, String> {
+    pub fn start(
+        moon: &Path,
+        cwd: &Path,
+        server_request_policy: ServerRequestPolicy,
+    ) -> Result<Self, String> {
         let moon = moon
             .canonicalize()
             .map_err(|error| format!("resolve MoonBit binary {}: {error}", moon.display()))?;
@@ -182,6 +211,7 @@ impl LspSession {
             version,
             cwd,
             root_uri,
+            server_request_policy,
         })
     }
 
@@ -428,6 +458,7 @@ impl LspSession {
         Ok(json!({
             "cwd": self.cwd,
             "root_uri": self.root_uri,
+            "server_request_policy": self.server_request_policy.label(),
             "timeline": self.timeline,
             "stderr": stderr,
         }))
@@ -479,34 +510,15 @@ impl LspSession {
     }
 
     fn handle_server_request(&mut self, message: &Value) -> Result<bool, String> {
-        let Some(method) = message.get("method").and_then(Value::as_str) else {
+        let Some(reply) = server_request_reply(message, self.server_request_policy)? else {
             return Ok(false);
-        };
-        let Some(id) = message.get("id").cloned() else {
-            return Ok(false);
-        };
-
-        let result = match method {
-            "workspace/configuration" => {
-                let count = message
-                    .pointer("/params/items")
-                    .and_then(Value::as_array)
-                    .map_or(0, Vec::len);
-                Value::Array(vec![Value::Null; count])
-            }
-            "client/registerCapability" | "window/workDoneProgress/create" => Value::Null,
-            _ => Value::Null,
         };
         self.timeline.push(json!({
             "event": "server_request",
-            "method": method,
-            "handling": if matches!(method, "workspace/configuration" | "client/registerCapability" | "window/workDoneProgress/create") {
-                "modeled"
-            } else {
-                "null-fallback"
-            },
+            "method": reply.method,
+            "handling": reply.handling,
         }));
-        self.send(response_message(id, result))?;
+        self.send(response_message(reply.id, reply.result))?;
         Ok(true)
     }
 
@@ -518,6 +530,66 @@ impl LspSession {
             "retained_bytes": state.bytes.len(),
             "limit_bytes": MAX_STDERR_BYTES,
         })
+    }
+}
+
+#[derive(Debug)]
+struct ServerRequestReply<'a> {
+    id: Value,
+    method: &'a str,
+    result: Value,
+    handling: &'static str,
+}
+
+fn server_request_reply(
+    message: &Value,
+    policy: ServerRequestPolicy,
+) -> Result<Option<ServerRequestReply<'_>>, String> {
+    let Some(method) = message.get("method").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    let Some(id) = message.get("id").cloned() else {
+        return Ok(None);
+    };
+
+    let (result, handling) = match method {
+        "workspace/configuration" => {
+            let count = message
+                .pointer("/params/items")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len);
+            (Value::Array(vec![Value::Null; count]), "modeled")
+        }
+        "client/registerCapability" | "window/workDoneProgress/create" => {
+            (Value::Null, "acknowledged")
+        }
+        _ if policy == ServerRequestPolicy::Exploratory => (Value::Null, "exploratory-null"),
+        _ => {
+            return Err(format!(
+                "unmodeled server request in strict mode: method={method:?}, id={id}, params={}",
+                bounded_json_context(message.get("params").unwrap_or(&Value::Null))
+            ));
+        }
+    };
+
+    Ok(Some(ServerRequestReply {
+        id,
+        method,
+        result,
+        handling,
+    }))
+}
+
+fn bounded_json_context(value: &Value) -> String {
+    const LIMIT: usize = 4096;
+    let rendered = value.to_string();
+    if rendered.chars().count() <= LIMIT {
+        rendered
+    } else {
+        format!(
+            "{}...[truncated]",
+            rendered.chars().take(LIMIT).collect::<String>()
+        )
     }
 }
 
@@ -571,7 +643,7 @@ pub fn run_capabilities(options: &ProbeOptions) -> Result<Value, String> {
         .join("tests/projects/geometry-library")
         .canonicalize()
         .map_err(|error| format!("resolve capabilities fixture: {error}"))?;
-    let mut session = LspSession::start(&options.moon, &fixture)?;
+    let mut session = LspSession::start(&options.moon, &fixture, options.server_request_policy)?;
     let binary = session.binary_json();
     let initialize = session.initialize()?;
     let capabilities = initialize
@@ -703,7 +775,7 @@ pub fn run_freshness(options: &ProbeOptions) -> Result<Value, String> {
         .map_err(|error| format!("resolve freshness fixture: {error}"))?;
     let path = fixture.join("geometry.mbt");
     let valid_text = read_source(&path)?;
-    let mut session = LspSession::start(&options.moon, &fixture)?;
+    let mut session = LspSession::start(&options.moon, &fixture, options.server_request_policy)?;
     let binary = session.binary_json();
     let initialize = session.initialize()?;
     if initialize.pointer("/capabilities/textDocumentSync") != Some(&json!(2)) {
@@ -858,7 +930,7 @@ fn run_root_scenario(
     root: &Path,
     modules: &[ModuleCase],
 ) -> Result<Value, String> {
-    let mut session = LspSession::start(&options.moon, root)?;
+    let mut session = LspSession::start(&options.moon, root, options.server_request_policy)?;
     let binary = session.binary_json();
     let initialize = session.initialize()?;
     let mut opened_uris = Vec::new();
@@ -1256,5 +1328,57 @@ mod tests {
             .expect("position after moon emoji");
 
         assert_eq!(position, json!({ "line": 1, "character": 13 }));
+    }
+
+    #[test]
+    fn strict_mode_rejects_unknown_server_requests_with_context() {
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": 91,
+            "method": "moonbit/unknownRequest",
+            "params": { "document": "geometry.mbt" },
+        });
+
+        let error = server_request_reply(&request, ServerRequestPolicy::Strict)
+            .expect_err("unknown request must fail strict evidence");
+
+        assert!(error.contains("moonbit/unknownRequest"));
+        assert!(error.contains("id=91"));
+        assert!(error.contains("geometry.mbt"));
+    }
+
+    #[test]
+    fn exploratory_mode_records_unknown_server_requests_before_null_reply() {
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": "probe-1",
+            "method": "moonbit/unknownRequest",
+            "params": {},
+        });
+
+        let reply = server_request_reply(&request, ServerRequestPolicy::Exploratory)
+            .expect("exploratory classification")
+            .expect("server request");
+
+        assert_eq!(reply.id, "probe-1");
+        assert_eq!(reply.result, Value::Null);
+        assert_eq!(reply.handling, "exploratory-null");
+    }
+
+    #[test]
+    fn workspace_configuration_has_a_modeled_response_shape() {
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "workspace/configuration",
+            "params": { "items": [{}, {}] },
+        });
+
+        let reply = server_request_reply(&request, ServerRequestPolicy::Strict)
+            .expect("modeled request")
+            .expect("server request");
+
+        assert_eq!(reply.result, json!([null, null]));
+        assert_eq!(reply.handling, "modeled");
     }
 }
