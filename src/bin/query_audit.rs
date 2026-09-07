@@ -287,6 +287,50 @@ mod tests {
     use serde_json::Value;
     use tree_sitter::{QueryCursor, StreamingIterator};
 
+    #[derive(Debug, PartialEq, Eq)]
+    struct CapturedNode {
+        name: String,
+        text: String,
+        kind: String,
+        row: usize,
+        pattern_index: usize,
+    }
+
+    fn captures_for(query_name: &str, source: &str) -> (Query, Vec<CapturedNode>) {
+        let language: Language = tree_sitter_moonbit::LANGUAGE.into();
+        let query_source =
+            read(Path::new(&format!("languages/moonbit/{query_name}.scm"))).expect("query source");
+        let query = Query::new(&language, &query_source).expect("compiled query");
+        let mut parser = Parser::new();
+        parser.set_language(&language).expect("MoonBit grammar");
+        let tree = parser.parse(source, None).expect("syntax tree");
+        assert!(
+            !tree.root_node().has_error(),
+            "semantic query case must parse: {}",
+            tree.root_node().to_sexp()
+        );
+
+        let mut cursor = QueryCursor::new();
+        let mut matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
+        let mut captures = Vec::new();
+        while let Some(query_match) = matches.next() {
+            for capture in query_match.captures {
+                captures.push(CapturedNode {
+                    name: query.capture_names()[capture.index as usize].to_string(),
+                    text: capture
+                        .node
+                        .utf8_text(source.as_bytes())
+                        .expect("UTF-8 capture")
+                        .to_string(),
+                    kind: capture.node.kind().to_string(),
+                    row: capture.node.start_position().row,
+                    pattern_index: query_match.pattern_index,
+                });
+            }
+        }
+        (query, captures)
+    }
+
     #[test]
     fn pinned_grammar_parses_representative_sources() {
         let report = audit().expect("strict grammar audit");
@@ -351,6 +395,89 @@ mod tests {
     fn unknown_highlight_capture_is_rejected() {
         assert!(!capture_allowed("highlights", "module"));
         assert!(capture_allowed("highlights", "type.builtin"));
+    }
+
+    #[test]
+    fn highlights_distinguish_builtin_types_parameters_and_doc_comments() {
+        let source = "/// API documentation\n// implementation note\nfn identity(value : Int) -> Int { value }\n";
+        let (_, captures) = captures_for("highlights", source);
+
+        assert!(captures
+            .iter()
+            .any(|capture| capture.name == "type.builtin" && capture.text == "Int"));
+        assert!(captures
+            .iter()
+            .any(|capture| { capture.name == "variable.parameter" && capture.text == "value" }));
+        assert!(captures.iter().any(|capture| {
+            capture.name == "comment.doc" && capture.text == "/// API documentation"
+        }));
+        assert!(!captures.iter().any(|capture| {
+            capture.name == "comment.doc" && capture.text == "// implementation note"
+        }));
+    }
+
+    #[test]
+    fn brackets_pair_delimiters_and_exclude_string_quotes_from_rainbow() {
+        let source = "fn main { let values = [(\"moon\")] }\n";
+        let (query, captures) = captures_for("brackets", source);
+        let pairs: BTreeSet<_> = captures
+            .iter()
+            .filter(|capture| capture.name == "open")
+            .map(|capture| capture.text.as_str())
+            .collect();
+
+        assert_eq!(pairs, BTreeSet::from(["\"", "(", "[", "{"]));
+        let quote_pattern = captures
+            .iter()
+            .find(|capture| capture.name == "open" && capture.text == "\"")
+            .expect("quote pair")
+            .pattern_index;
+        assert!(query
+            .property_settings(quote_pattern)
+            .iter()
+            .any(|property| property.key.as_ref() == "rainbow.exclude"));
+        assert!(captures
+            .iter()
+            .filter(|capture| capture.name == "open")
+            .all(|open| captures.iter().any(|close| {
+                close.pattern_index == open.pattern_index
+                    && close.name == "close"
+                    && close.text
+                        == match open.text.as_str() {
+                            "{" => "}",
+                            "[" => "]",
+                            "(" => ")",
+                            "\"" => "\"",
+                            _ => unreachable!("known bracket"),
+                        }
+            })));
+    }
+
+    #[test]
+    fn indents_bind_structural_nodes_to_their_closing_delimiters() {
+        let source = read(Path::new("tests/cases/syntax.mbt")).expect("syntax case");
+        let (_, captures) = captures_for("indents", &source);
+        let indent_kinds: BTreeSet<_> = captures
+            .iter()
+            .filter(|capture| capture.name == "indent")
+            .map(|capture| capture.kind.as_str())
+            .collect();
+
+        assert!(indent_kinds.contains("block_expression"));
+        assert!(indent_kinds.contains("match_expression"));
+        assert!(indent_kinds.contains("parameters"));
+        assert!(captures
+            .iter()
+            .filter(|capture| capture.name == "end")
+            .all(|capture| matches!(capture.text.as_str(), ")" | "]" | "}")));
+        assert!(captures
+            .iter()
+            .filter(|capture| capture.name == "indent")
+            .all(|indent| captures.iter().any(|end| {
+                end.pattern_index == indent.pattern_index
+                    && end.name == "end"
+                    && end.row >= indent.row
+            })));
     }
 
     #[test]
