@@ -14,6 +14,12 @@ enum EnvironmentOrigin {
     Configured,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EnvironmentKeySemantics {
+    CaseSensitive,
+    AsciiCaseInsensitive,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct EnvironmentEntry {
     key: String,
@@ -56,6 +62,7 @@ pub(crate) fn build_launch_plan(
     configured_args: Option<Vec<String>>,
     shell_env: Vec<(String, String)>,
     configured_env: Option<HashMap<String, String>>,
+    environment_key_semantics: EnvironmentKeySemantics,
 ) -> Result<LaunchPlan> {
     let (command, command_origin) = match configured_path {
         Some(path) if path.trim().is_empty() => {
@@ -78,7 +85,7 @@ pub(crate) fn build_launch_plan(
         command,
         command_origin,
         args,
-        environment: merge_environment(shell_env, configured_env),
+        environment: merge_environment(shell_env, configured_env, environment_key_semantics),
     })
 }
 
@@ -108,24 +115,42 @@ fn validate_arguments(args: &[String]) -> Result<()> {
 fn merge_environment(
     shell_env: Vec<(String, String)>,
     configured_env: Option<HashMap<String, String>>,
+    key_semantics: EnvironmentKeySemantics,
 ) -> Vec<EnvironmentEntry> {
     let mut entries = BTreeMap::new();
     for (key, value) in shell_env {
-        entries.insert(key, (value, EnvironmentOrigin::WorktreeShell));
+        entries.insert(
+            normalized_environment_key(&key, key_semantics),
+            (key, value, EnvironmentOrigin::WorktreeShell),
+        );
     }
     for (key, value) in configured_env.unwrap_or_default() {
-        entries.insert(key, (value, EnvironmentOrigin::Configured));
+        entries.insert(
+            normalized_environment_key(&key, key_semantics),
+            (key, value, EnvironmentOrigin::Configured),
+        );
     }
 
     entries
         .into_iter()
-        .map(|(key, (value, origin))| EnvironmentEntry { key, value, origin })
+        .map(|(_, (key, value, origin))| EnvironmentEntry { key, value, origin })
         .collect()
+}
+
+fn normalized_environment_key(key: &str, semantics: EnvironmentKeySemantics) -> String {
+    match semantics {
+        EnvironmentKeySemantics::CaseSensitive => key.to_string(),
+        EnvironmentKeySemantics::AsciiCaseInsensitive => key.to_ascii_uppercase(),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn unix_environment() -> EnvironmentKeySemantics {
+        EnvironmentKeySemantics::CaseSensitive
+    }
 
     #[test]
     fn defaults_to_worktree_moon_and_lsp_subcommand() {
@@ -135,6 +160,7 @@ mod tests {
             None,
             vec![],
             None,
+            unix_environment(),
         )
         .expect("default plan");
 
@@ -151,6 +177,7 @@ mod tests {
             None,
             vec![],
             None,
+            unix_environment(),
         )
         .expect("configured plan");
 
@@ -166,6 +193,7 @@ mod tests {
             None,
             vec![],
             None,
+            unix_environment(),
         )
         .expect_err("empty command should fail");
 
@@ -174,7 +202,7 @@ mod tests {
 
     #[test]
     fn missing_command_reports_the_worktree_lookup() {
-        let error = build_launch_plan(None, None, None, vec![], None)
+        let error = build_launch_plan(None, None, None, vec![], None, unix_environment())
             .expect_err("missing command should fail");
 
         assert!(error.contains("worktree's PATH"));
@@ -188,6 +216,7 @@ mod tests {
             Some(vec!["lsp".to_string(), "--trace".to_string()]),
             vec![],
             None,
+            unix_environment(),
         )
         .expect("configured arguments");
 
@@ -202,6 +231,7 @@ mod tests {
             Some(vec!["--trace".to_string()]),
             vec![],
             None,
+            unix_environment(),
         )
         .expect_err("missing subcommand should fail");
 
@@ -216,6 +246,7 @@ mod tests {
             Some(vec!["lsp".to_string(), "lsp".to_string()]),
             vec![],
             None,
+            unix_environment(),
         )
         .expect_err("duplicate subcommand should fail");
 
@@ -236,6 +267,7 @@ mod tests {
                 ("MOON_HOME".to_string(), "/configured/moon".to_string()),
                 ("MOON_WORK".to_string(), "off".to_string()),
             ])),
+            unix_environment(),
         )
         .expect("merged environment");
 
@@ -259,5 +291,55 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn windows_environment_keys_are_case_insensitive() {
+        let plan = build_launch_plan(
+            None,
+            Some("moon.exe".to_string()),
+            None,
+            vec![("PATH".to_string(), r"C:\shell".to_string())],
+            Some(HashMap::from([(
+                "Path".to_string(),
+                r"C:\configured".to_string(),
+            )])),
+            EnvironmentKeySemantics::AsciiCaseInsensitive,
+        )
+        .expect("Windows environment");
+
+        assert_eq!(
+            plan.environment,
+            vec![EnvironmentEntry {
+                key: "Path".to_string(),
+                value: r"C:\configured".to_string(),
+                origin: EnvironmentOrigin::Configured,
+            }]
+        );
+    }
+
+    #[test]
+    fn unix_environment_keys_remain_case_sensitive() {
+        let plan = build_launch_plan(
+            None,
+            Some("moon".to_string()),
+            None,
+            vec![("PATH".to_string(), "/shell".to_string())],
+            Some(HashMap::from([(
+                "Path".to_string(),
+                "/configured".to_string(),
+            )])),
+            EnvironmentKeySemantics::CaseSensitive,
+        )
+        .expect("Unix environment");
+
+        assert_eq!(plan.environment.len(), 2);
+        assert!(plan.environment.iter().any(|entry| {
+            entry.key == "PATH" && entry.origin == EnvironmentOrigin::WorktreeShell
+        }));
+        assert!(plan
+            .environment
+            .iter()
+            .any(|entry| { entry.key == "Path" && entry.origin == EnvironmentOrigin::Configured }));
     }
 }
