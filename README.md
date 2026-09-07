@@ -7,8 +7,10 @@ The extension remains a thin client: MoonBit owns language semantics and its
 module/package/workspace model, while the extension supplies Zed registration,
 launch transport, syntax queries, and declarative tasks.
 
-Version `0.2.9` is the first Cycle 3 iteration. This repository does not yet
-claim Zed Registry publication or MoonBit 1.0 compatibility.
+Version `0.3.1` is the post-review candidate after the accepted Cycle 3 editor
+surface. Version 0.3.0 is recognized as that usability milestone but was
+intentionally skipped as a manifest release. This repository does not yet claim
+Zed Registry publication or MoonBit 1.0 compatibility.
 
 ## Development installation
 

@@ -348,11 +348,10 @@ mod tests {
 
     #[test]
     fn release_version_mismatch_names_both_manifest_fields() {
-        let extension = include_str!("../../extension.toml").replacen(
-            "version = \"0.2.9\"",
-            "version = \"9.9.9\"",
-            1,
-        );
+        let mut extension: toml::Value =
+            toml::from_str(include_str!("../../extension.toml")).expect("extension manifest");
+        extension["version"] = toml::Value::String("9.9.9".to_string());
+        let extension = toml::to_string(&extension).expect("mutated extension manifest");
         let error = validate_manifest_consistency(include_str!("../../Cargo.toml"), &extension)
             .expect_err("release mismatch");
 
