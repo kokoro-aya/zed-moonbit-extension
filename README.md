@@ -27,7 +27,8 @@ the Registry:
 
 Zed and MoonBit both provide macOS, Linux, and Windows distributions. The
 extension's production component is WASI, uses structured task arguments, and
-does not invoke a Unix shell. The macOS editor path is independently tested;
+does not select a Unix-only shell or script. The macOS editor path is
+independently tested;
 Linux and Windows remain portability targets until their own editor runs are
 recorded. Registry installation is also still a non-claim.
 
