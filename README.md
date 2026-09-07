@@ -10,6 +10,44 @@ launch transport, syntax queries, and declarative tasks.
 Version `0.2.9` is the first Cycle 3 iteration. This repository does not yet
 claim Zed Registry publication or MoonBit 1.0 compatibility.
 
+## Development installation
+
+MoonBit Lab currently installs as a Zed development extension rather than from
+the Registry:
+
+1. Install a current Zed release and the MoonBit toolchain for the host OS.
+2. Verify that `moon --version` works in the project environment visible to
+   Zed. Restart Zed after changing `PATH`.
+3. Clone this repository, run **zed: install dev extension** from the command
+   palette, and select this `zed-mbt-extension` directory.
+4. Open a directory containing `moon.mod`, or a parent workspace containing
+   `moon.work`, then open an `.mbt` file.
+
+Zed and MoonBit both provide macOS, Linux, and Windows distributions. The
+extension's production component is WASI, uses structured task arguments, and
+does not invoke a Unix shell. The macOS editor path is independently tested;
+Linux and Windows remain portability targets until their own editor runs are
+recorded. Registry installation is also still a non-claim.
+
+If `moon` is intentionally absent from Zed's project `PATH`, configure an
+absolute language-server command with the standard Zed setting:
+
+```json
+{
+  "lsp": {
+    "moonbit": {
+      "binary": {
+        "path": "/absolute/path/to/moon",
+        "arguments": ["lsp"]
+      }
+    }
+  }
+}
+```
+
+That setting controls the LSP only; tasks retain the project-environment
+contract described below.
+
 ## Toolchain and task roots
 
 The LSP and tasks have deliberately separate toolchain contracts. The standard
