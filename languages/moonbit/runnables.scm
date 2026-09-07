@@ -7,5 +7,8 @@
 
 (structure
   (test_definition
-    "test" @run)
+    "test" @run
+    (string_literal
+      (string_fragment
+        (unescaped_string_fragment) @MOONBIT_TEST_NAME)))
   (#set! tag "moon-test"))

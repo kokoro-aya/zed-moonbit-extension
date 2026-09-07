@@ -1,29 +1,52 @@
 [
   {
-    "label": "MoonBit: check workspace",
+    "label": "MoonBit: check current project",
     "command": "moon",
-    "args": ["check"]
+    "args": ["check"],
+    "cwd": "$ZED_DIRNAME"
   },
   {
-    "label": "MoonBit: test workspace",
+    "label": "MoonBit: test current project",
     "command": "moon",
-    "args": ["test"]
+    "args": ["test"],
+    "cwd": "$ZED_DIRNAME"
   },
   {
     "label": "MoonBit: run current file",
     "command": "moon",
-    "args": ["run", "$ZED_RELATIVE_FILE"],
+    "args": ["run", "$ZED_FILE"],
+    "cwd": "$ZED_DIRNAME",
     "tags": ["moon-run"]
   },
   {
-    "label": "MoonBit: test current file",
+    "label": "MoonBit: test $ZED_CUSTOM_MOONBIT_TEST_NAME",
     "command": "moon",
-    "args": ["test", "$ZED_RELATIVE_FILE"],
+    "args": ["test", "$ZED_FILE", "--filter", "$ZED_CUSTOM_MOONBIT_TEST_NAME"],
+    "cwd": "$ZED_DIRNAME",
     "tags": ["moon-test"]
   },
   {
-    "label": "MoonBit: check formatting",
+    "label": "MoonBit: check formatting in current project",
     "command": "moon",
-    "args": ["fmt", "--check"]
+    "args": ["fmt", "--check"],
+    "cwd": "$ZED_DIRNAME"
+  },
+  {
+    "label": "MoonBit: check worktree root",
+    "command": "moon",
+    "args": ["check"],
+    "cwd": "$ZED_WORKTREE_ROOT"
+  },
+  {
+    "label": "MoonBit: test worktree root",
+    "command": "moon",
+    "args": ["test"],
+    "cwd": "$ZED_WORKTREE_ROOT"
+  },
+  {
+    "label": "MoonBit: check formatting at worktree root",
+    "command": "moon",
+    "args": ["fmt", "--check"],
+    "cwd": "$ZED_WORKTREE_ROOT"
   }
 ]

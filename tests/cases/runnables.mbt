@@ -20,3 +20,8 @@ fn main {
 test "top-level test" {
   inspect(outer(), content="42")
 }
+
+///|
+test "second top-level test" {
+  inspect(helper(), content="42")
+}

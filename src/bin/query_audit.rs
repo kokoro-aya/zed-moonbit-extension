@@ -270,7 +270,9 @@ fn capture_allowed(family: &str, capture: &str) -> bool {
         "brackets" => matches!(capture, "open" | "close"),
         "indents" => matches!(capture, "indent" | "end"),
         "outline" => matches!(capture, "name" | "item" | "context" | "context.extra"),
-        "runnables" => capture == "run" || capture.starts_with('_'),
+        "runnables" => {
+            capture == "run" || capture == "MOONBIT_TEST_NAME" || capture.starts_with('_')
+        }
         _ => false,
     }
 }
@@ -392,15 +394,33 @@ mod tests {
             .expect("tasks JSON");
         let tasks = tasks.as_array().expect("task inventory");
 
-        assert_eq!(tasks.len(), 5);
+        assert_eq!(tasks.len(), 8);
         assert!(tasks.iter().all(|task| task["command"] == "moon"));
         assert!(tasks.iter().all(|task| task["args"].is_array()));
-        assert!(tasks.iter().all(|task| task.get("cwd").is_none()));
-        let format = tasks
+        assert!(tasks
             .iter()
-            .find(|task| task["label"] == "MoonBit: check formatting")
-            .expect("format-check task");
-        assert_eq!(format["args"], serde_json::json!(["fmt", "--check"]));
+            .all(|task| task["cwd"] == "$ZED_DIRNAME" || task["cwd"] == "$ZED_WORKTREE_ROOT"));
+        let project_format = tasks
+            .iter()
+            .find(|task| task["label"] == "MoonBit: check formatting in current project")
+            .expect("project format-check task");
+        assert_eq!(
+            project_format["args"],
+            serde_json::json!(["fmt", "--check"])
+        );
+        let declaration_test = tasks
+            .iter()
+            .find(|task| task["tags"] == serde_json::json!(["moon-test"]))
+            .expect("declaration test task");
+        assert_eq!(
+            declaration_test["args"],
+            serde_json::json!([
+                "test",
+                "$ZED_FILE",
+                "--filter",
+                "$ZED_CUSTOM_MOONBIT_TEST_NAME"
+            ])
+        );
     }
 
     #[test]
@@ -414,9 +434,13 @@ mod tests {
         parser.set_language(&language).expect("MoonBit grammar");
         let tree = parser.parse(&source, None).expect("runnable syntax tree");
         let run_index = query.capture_index_for_name("run").expect("run capture");
+        let test_name_index = query
+            .capture_index_for_name("MOONBIT_TEST_NAME")
+            .expect("test name capture");
         let mut cursor = QueryCursor::new();
         let mut matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
         let mut captures = Vec::new();
+        let mut test_names = BTreeSet::new();
         while let Some(query_match) = matches.next() {
             let tag = query
                 .property_settings(query_match.pattern_index)
@@ -435,16 +459,34 @@ mod tests {
                         capture.node.start_position().row,
                         tag.to_string(),
                     ));
+                } else if capture.index == test_name_index {
+                    test_names.insert(
+                        capture
+                            .node
+                            .utf8_text(source.as_bytes())
+                            .expect("UTF-8 test name")
+                            .to_string(),
+                    );
                 }
             }
         }
 
-        assert_eq!(captures.len(), 2);
+        assert_eq!(captures.len(), 3);
         assert!(captures
             .iter()
             .any(|(text, row, tag)| text == "main" && *row == 14 && tag == "moon-run"));
         assert!(captures
             .iter()
             .any(|(text, row, tag)| text == "test" && *row == 19 && tag == "moon-test"));
+        assert!(captures
+            .iter()
+            .any(|(text, row, tag)| text == "test" && *row == 24 && tag == "moon-test"));
+        assert_eq!(
+            test_names,
+            BTreeSet::from([
+                "second top-level test".to_string(),
+                "top-level test".to_string(),
+            ])
+        );
     }
 }
