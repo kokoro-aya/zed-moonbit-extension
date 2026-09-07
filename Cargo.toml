@@ -10,6 +10,7 @@ dev-tools = [
     "dep:serde_json",
     "dep:tree-sitter",
     "dep:tree-sitter-moonbit",
+    "dep:toml",
     "dep:url",
 ]
 
@@ -31,5 +32,6 @@ required-features = ["dev-tools"]
 serde_json = { version = "1.0", optional = true }
 tree-sitter = { version = "0.26.8", optional = true }
 tree-sitter-moonbit = { git = "https://github.com/moonbitlang/tree-sitter-moonbit", rev = "5435c307c6cf2ef0d508a99047b06f35a4308444", optional = true }
+toml = { version = "0.9", optional = true }
 url = { version = "2.5", optional = true }
 zed_extension_api = "0.7.0"

@@ -21,9 +21,6 @@ const EXPECTED_QUERY_FILES: [&str; 5] = [
 ];
 
 fn main() {
-    let strict = std::env::args()
-        .skip(1)
-        .any(|argument| argument == "--strict");
     match audit() {
         Ok(report) => {
             println!("grammar_revision={}", report.grammar_revision);
@@ -38,21 +35,23 @@ fn main() {
         }
         Err(error) => {
             eprintln!("query audit failed: {error}");
-            if strict {
-                std::process::exit(1);
-            }
+            std::process::exit(1);
         }
     }
 }
 
 #[derive(Debug)]
 struct AuditReport {
-    grammar_revision: &'static str,
+    grammar_revision: String,
     query_files: Vec<PathBuf>,
     parsed_cases: Vec<PathBuf>,
 }
 
 fn audit() -> Result<AuditReport, String> {
+    let pins = validate_manifest_consistency(
+        &read(Path::new("Cargo.toml"))?,
+        &read(Path::new("extension.toml"))?,
+    )?;
     let language: Language = tree_sitter_moonbit::LANGUAGE.into();
     let query_files = collect_query_files(Path::new(QUERY_DIR))?;
     validate_inventory(&query_files)?;
@@ -87,10 +86,103 @@ fn audit() -> Result<AuditReport, String> {
     }
 
     Ok(AuditReport {
-        grammar_revision: "5435c307c6cf2ef0d508a99047b06f35a4308444",
+        grammar_revision: pins.grammar_revision,
         query_files,
         parsed_cases,
     })
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ManifestPins {
+    grammar_revision: String,
+}
+
+fn validate_manifest_consistency(
+    cargo_source: &str,
+    extension_source: &str,
+) -> Result<ManifestPins, String> {
+    let cargo: toml::Value = toml::from_str(cargo_source)
+        .map_err(|error| format!("Cargo.toml is not valid TOML: {error}"))?;
+    let extension: toml::Value = toml::from_str(extension_source)
+        .map_err(|error| format!("extension.toml is not valid TOML: {error}"))?;
+
+    let cargo_version = manifest_string(&cargo, &["package", "version"], "Cargo.toml")?;
+    let extension_version = manifest_string(&extension, &["version"], "extension.toml")?;
+    require_equal_pin(
+        "extension release version",
+        "Cargo.toml package.version",
+        cargo_version,
+        "extension.toml version",
+        extension_version,
+    )?;
+
+    let api_version =
+        manifest_string(&cargo, &["dependencies", "zed_extension_api"], "Cargo.toml")?;
+    let wasm_api_version = manifest_string(&extension, &["lib", "version"], "extension.toml")?;
+    require_equal_pin(
+        "Zed extension API version",
+        "Cargo.toml dependencies.zed_extension_api",
+        api_version,
+        "extension.toml lib.version",
+        wasm_api_version,
+    )?;
+
+    let grammar_revision = manifest_string(
+        &cargo,
+        &["dependencies", "tree-sitter-moonbit", "rev"],
+        "Cargo.toml",
+    )?;
+    let extension_grammar_revision = manifest_string(
+        &extension,
+        &["grammars", "moonbit", "rev"],
+        "extension.toml",
+    )?;
+    require_equal_pin(
+        "MoonBit grammar revision",
+        "Cargo.toml dependencies.tree-sitter-moonbit.rev",
+        grammar_revision,
+        "extension.toml grammars.moonbit.rev",
+        extension_grammar_revision,
+    )?;
+
+    Ok(ManifestPins {
+        grammar_revision: grammar_revision.to_string(),
+    })
+}
+
+fn manifest_string<'a>(
+    manifest: &'a toml::Value,
+    path: &[&str],
+    manifest_name: &str,
+) -> Result<&'a str, String> {
+    let mut value = manifest;
+    for segment in path {
+        value = value
+            .get(*segment)
+            .ok_or_else(|| format!("{manifest_name} is missing required pin {}", path.join(".")))?;
+    }
+    value.as_str().ok_or_else(|| {
+        format!(
+            "{manifest_name} pin {} must be a string, found {value}",
+            path.join(".")
+        )
+    })
+}
+
+fn require_equal_pin(
+    pin_name: &str,
+    left_name: &str,
+    left: &str,
+    right_name: &str,
+    right: &str,
+) -> Result<(), String> {
+    if left == right {
+        Ok(())
+    } else {
+        Err(format!(
+            "{pin_name} mismatch: {left_name}={left:?}, {right_name}={right:?}"
+        ))
+    }
 }
 
 fn collect_query_files(directory: &Path) -> Result<Vec<PathBuf>, String> {
@@ -197,6 +289,60 @@ mod tests {
     fn pinned_grammar_parses_representative_sources() {
         let report = audit().expect("strict grammar audit");
         assert_eq!(report.parsed_cases.len(), 3);
+    }
+
+    #[test]
+    fn actual_manifests_keep_release_api_and_grammar_pins_equal() {
+        validate_manifest_consistency(
+            include_str!("../../Cargo.toml"),
+            include_str!("../../extension.toml"),
+        )
+        .expect("manifest pins");
+    }
+
+    #[test]
+    fn release_version_mismatch_names_both_manifest_fields() {
+        let extension = include_str!("../../extension.toml").replacen(
+            "version = \"0.2.9\"",
+            "version = \"9.9.9\"",
+            1,
+        );
+        let error = validate_manifest_consistency(include_str!("../../Cargo.toml"), &extension)
+            .expect_err("release mismatch");
+
+        assert!(error.contains("extension release version mismatch"));
+        assert!(error.contains("Cargo.toml package.version"));
+        assert!(error.contains("extension.toml version"));
+    }
+
+    #[test]
+    fn api_version_mismatch_names_both_manifest_fields() {
+        let extension = include_str!("../../extension.toml").replacen(
+            "version = \"0.7.0\"",
+            "version = \"9.9.9\"",
+            1,
+        );
+        let error = validate_manifest_consistency(include_str!("../../Cargo.toml"), &extension)
+            .expect_err("API mismatch");
+
+        assert!(error.contains("Zed extension API version mismatch"));
+        assert!(error.contains("dependencies.zed_extension_api"));
+        assert!(error.contains("lib.version"));
+    }
+
+    #[test]
+    fn grammar_revision_mismatch_names_both_manifest_fields() {
+        let extension = include_str!("../../extension.toml").replacen(
+            "5435c307c6cf2ef0d508a99047b06f35a4308444",
+            "deadbeef",
+            1,
+        );
+        let error = validate_manifest_consistency(include_str!("../../Cargo.toml"), &extension)
+            .expect_err("grammar mismatch");
+
+        assert!(error.contains("MoonBit grammar revision mismatch"));
+        assert!(error.contains("dependencies.tree-sitter-moonbit.rev"));
+        assert!(error.contains("grammars.moonbit.rev"));
     }
 
     #[test]
