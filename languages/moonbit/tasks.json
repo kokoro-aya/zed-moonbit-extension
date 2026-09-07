@@ -14,14 +14,14 @@
   {
     "label": "MoonBit: run current file",
     "command": "moon",
-    "args": ["run", "$ZED_FILE"],
+    "args": ["run", "\"$ZED_FILENAME\""],
     "cwd": "$ZED_DIRNAME",
     "tags": ["moon-run"]
   },
   {
     "label": "MoonBit: test $ZED_CUSTOM_MOONBIT_TEST_NAME",
     "command": "moon",
-    "args": ["test", "$ZED_FILE", "--filter", "$ZED_CUSTOM_MOONBIT_TEST_NAME"],
+    "args": ["test", "\"$ZED_FILENAME\"", "--filter", "\"$ZED_CUSTOM_MOONBIT_TEST_NAME\""],
     "cwd": "$ZED_DIRNAME",
     "tags": ["moon-test"]
   },

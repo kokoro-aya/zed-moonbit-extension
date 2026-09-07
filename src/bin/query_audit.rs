@@ -542,9 +542,9 @@ mod tests {
             declaration_test["args"],
             serde_json::json!([
                 "test",
-                "$ZED_FILE",
+                "\"$ZED_FILENAME\"",
                 "--filter",
-                "$ZED_CUSTOM_MOONBIT_TEST_NAME"
+                "\"$ZED_CUSTOM_MOONBIT_TEST_NAME\""
             ])
         );
     }
