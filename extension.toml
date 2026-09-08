@@ -3,8 +3,8 @@ name = "MoonBit Lab"
 description = "Native MoonBit language support for Zed, developed as a provenance-aware thin client."
 version = "0.3.1"
 schema_version = 1
-authors = ["PL Playground"]
-repository = "https://github.com/kokoro-aya/playgrounds"
+authors = ["kokoro-aya"]
+repository = "https://github.com/kokoro-aya/zed-moonbit-extension"
 capabilities = []
 
 [grammars.moonbit]
