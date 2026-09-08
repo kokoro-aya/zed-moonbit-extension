@@ -21,7 +21,7 @@ the Registry:
 2. Verify that `moon --version` works in the project environment visible to
    Zed. Restart Zed after changing `PATH`.
 3. Clone this repository, run **zed: install dev extension** from the command
-   palette, and select this `zed-mbt-extension` directory.
+   palette, and select the directory containing extension.toml.
 4. Open a directory containing `moon.mod`, or a parent workspace containing
    `moon.work`, then open an `.mbt` file.
 
